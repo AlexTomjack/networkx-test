@@ -6,6 +6,7 @@ def build_random_gas_network() -> nx.DiGraph:
 	Nodes have attributes:
 	- kind: "source" | "sink" | "intermediate"
 	- node_capacity: max total flow through the node
+	- production_capacity (sources only): max gas that can be produced
 	- demand (sinks only): desired gas amount
 
 	Edges have attribute:
@@ -14,8 +15,20 @@ def build_random_gas_network() -> nx.DiGraph:
 
 	G = nx.DiGraph()
 
-	G.add_node("src_0", kind="source", node_capacity=12_000)
-	G.add_node("src_1", kind="source", node_capacity=10_000)
+	# Sources: node_capacity is pipeline through-put; production_capacity
+	# is how much gas the source itself can inject into the network.
+	G.add_node(
+		"src_0",
+		kind="source",
+		node_capacity=12_000,
+		production_capacity=10_000,
+	)
+	G.add_node(
+		"src_1",
+		kind="source",
+		node_capacity=10_000,
+		production_capacity=7_000,
+	)
 
 	G.add_node("mid_0", kind="intermediate", node_capacity=9_000)
 	G.add_node("mid_1", kind="intermediate", node_capacity=9_000)
@@ -78,7 +91,10 @@ def build_flow_network_with_node_capacities(base_graph: nx.DiGraph) -> nx.DiGrap
 	for n, data in base_graph.nodes(data=True):
 		kind = data.get("kind")
 		if kind == "source":
-			F.add_edge(super_source, f"{n}_in", capacity=10**12)
+			prod_cap = data.get("production_capacity")
+			if prod_cap is None:
+				raise ValueError(f"Source node {n} missing production_capacity")
+			F.add_edge(super_source, f"{n}_in", capacity=prod_cap)
 
 	for n, data in base_graph.nodes(data=True):
 		kind = data.get("kind")
@@ -128,10 +144,14 @@ def run_gas_flow_demo() -> None:
 
 	print("\nNode capacities:")
 	for n, data in base.nodes(data=True):
-		print(
-			f"  {n:8s} kind={data.get('kind'):12s} "
-			f"node_capacity={int(data['node_capacity']):,}"
-		)
+		kind = data.get("kind") or ""
+		node_cap = int(data.get("node_capacity", 0))
+		if kind == "source":
+			prod_cap = int(data.get("production_capacity", 0))
+			extra = f" production_capacity={prod_cap:,}"
+		else:
+			extra = ""
+		print(f"  {n:8s} kind={kind:12s} node_capacity={node_cap:,}{extra}")
 
 	visualize_network_and_flow(base, flow_dict)
 
@@ -147,6 +167,8 @@ def visualize_network_and_flow(base_graph: nx.DiGraph, flow_dict: dict) -> None:
 	except ImportError:
 		print("matplotlib not installed; skipping visualization.")
 		return
+
+	import math
 
 	pos = nx.spring_layout(base_graph, seed=7)
 
@@ -168,57 +190,141 @@ def visualize_network_and_flow(base_graph: nx.DiGraph, flow_dict: dict) -> None:
 		flow_uv = float(flow_dict.get(f"{u}_out", {}).get(f"{v}_in", 0.0))
 		edge_flows[(u, v)] = flow_uv
 
-	plt.figure(figsize=(8, 6))
-	nx.draw_networkx_nodes(base_graph, pos, node_color=node_colors, edgecolors="black")
-	nx.draw_networkx_edges(base_graph, pos, arrowstyle="->", arrowsize=15)
-	nx.draw_networkx_labels(base_graph, pos, font_size=9)
+	fig, ax = plt.subplots(figsize=(9, 7))
 
-	edge_labels = {}
-	for (u, v), cap in edge_capacities.items():
-		flow_uv = edge_flows.get((u, v), 0.0)
-		edge_labels[(u, v)] = f"{int(flow_uv)}/{int(cap)}"
-
-	nx.draw_networkx_edge_labels(
-		base_graph,
-		pos,
-		edge_labels=edge_labels,
-		font_size=8,
-		label_pos=0.5,
-	)
-
-	# Draw self-loop edges to represent in/out node-capacity edges (n_in -> n_out)
-	self_edges = []
-	self_edge_labels = {}
+	# Precompute simple numeric labels by stripping the src_/mid_/sink_ prefix
+	node_labels: dict[str, str] = {}
 	for n in base_graph.nodes:
-		node_cap = base_graph.nodes[n].get("node_capacity")
-		if node_cap is None:
-			continue
-		node_flow = float(flow_dict.get(f"{n}_in", {}).get(f"{n}_out", 0.0))
-		self_edges.append((n, n))
-		self_edge_labels[(n, n)] = f"{int(node_flow)}/{int(node_cap)}"
+		parts = n.split("_", 1)
+		label = parts[1] if len(parts) == 2 else n
+		node_labels[n] = label
 
-	if self_edges:
+	def draw() -> None:
+		ax.clear()
+		nx.draw_networkx_nodes(
+			base_graph,
+			pos,
+			node_color=node_colors,
+			edgecolors="black",
+			node_size=700,
+			linewidths=1.5,
+			ax=ax,
+		)
 		nx.draw_networkx_edges(
 			base_graph,
 			pos,
-			edgelist=self_edges,
 			arrowstyle="-|>",
-			arrowsize=12,
-			edge_color="gray",
-			style="dashed",
-			connectionstyle="arc3,rad=0.3",
+			arrowsize=18,
+			width=1.6,
+			ax=ax,
 		)
+		nx.draw_networkx_labels(
+			base_graph,
+			pos,
+			labels=node_labels,
+			font_size=11,
+			font_weight="bold",
+			ax=ax,
+		)
+
+		edge_labels = {}
+		for (u, v), cap in edge_capacities.items():
+			flow_uv = edge_flows.get((u, v), 0.0)
+			edge_labels[(u, v)] = f"{int(flow_uv)}/{int(cap)}"
+
 		nx.draw_networkx_edge_labels(
 			base_graph,
 			pos,
-			edge_labels=self_edge_labels,
-			font_size=7,
-			label_pos=0.2,
+			edge_labels=edge_labels,
+			font_size=9,
+			label_pos=0.45,
+			ax=ax,
 		)
 
-	plt.title("Gas network (edge and node flow/capacity)")
-	plt.axis("off")
-	plt.tight_layout()
+		# Draw self-loop edges to represent in/out node-capacity edges (n_in -> n_out)
+		self_edges = []
+		self_edge_labels = {}
+		for n in base_graph.nodes:
+			node_cap = base_graph.nodes[n].get("node_capacity")
+			if node_cap is None:
+				continue
+			node_flow = float(flow_dict.get(f"{n}_in", {}).get(f"{n}_out", 0.0))
+			self_edges.append((n, n))
+			self_edge_labels[(n, n)] = f"{int(node_flow)}/{int(node_cap)}"
+
+		if self_edges:
+			nx.draw_networkx_edges(
+				base_graph,
+				pos,
+				edgelist=self_edges,
+				arrowstyle="-|>",
+				arrowsize=14,
+				edge_color="gray",
+				style="dashed",
+				width=1.4,
+				connectionstyle="arc3,rad=0.18",
+				ax=ax,
+			)
+			nx.draw_networkx_edge_labels(
+				base_graph,
+				pos,
+				edge_labels=self_edge_labels,
+				font_size=9,
+				label_pos=0.18,
+				ax=ax,
+			)
+
+		ax.set_title(
+			"Gas network (edge and node flow/capacity)",
+			fontsize=14,
+			fontweight="bold",
+		)
+		ax.axis("off")
+		fig.tight_layout()
+
+	# Initial draw
+	draw()
+
+	selected = {"node": None}
+
+	def _node_at_event(event) -> str | None:
+		if event.inaxes is not ax:
+			return None
+		min_node: str | None = None
+		min_dist = float("inf")
+		pick_radius = 20.0  # pixels
+		for node, (x, y) in pos.items():
+			x_disp, y_disp = ax.transData.transform((x, y))
+			dx = x_disp - event.x
+			dy = y_disp - event.y
+			dist = math.hypot(dx, dy)
+			if dist < pick_radius and dist < min_dist:
+				min_dist = dist
+				min_node = node
+		return min_node
+
+	def on_press(event) -> None:
+		node = _node_at_event(event)
+		if node is not None:
+			selected["node"] = node
+
+	def on_release(event) -> None:
+		selected["node"] = None
+
+	def on_motion(event) -> None:
+		node = selected.get("node")
+		if node is None:
+			return
+		if event.inaxes is not ax or event.xdata is None or event.ydata is None:
+			return
+		pos[node] = (event.xdata, event.ydata)
+		draw()
+		fig.canvas.draw_idle()
+
+	fig.canvas.mpl_connect("button_press_event", on_press)
+	fig.canvas.mpl_connect("button_release_event", on_release)
+	fig.canvas.mpl_connect("motion_notify_event", on_motion)
+
 	plt.show()
 
 
