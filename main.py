@@ -186,7 +186,37 @@ def visualize_network_and_flow(base_graph: nx.DiGraph, flow_dict: dict) -> None:
 		label_pos=0.5,
 	)
 
-	plt.title("Gas network (flow/capacity)")
+	# Draw self-loop edges to represent in/out node-capacity edges (n_in -> n_out)
+	self_edges = []
+	self_edge_labels = {}
+	for n in base_graph.nodes:
+		node_cap = base_graph.nodes[n].get("node_capacity")
+		if node_cap is None:
+			continue
+		node_flow = float(flow_dict.get(f"{n}_in", {}).get(f"{n}_out", 0.0))
+		self_edges.append((n, n))
+		self_edge_labels[(n, n)] = f"{int(node_flow)}/{int(node_cap)}"
+
+	if self_edges:
+		nx.draw_networkx_edges(
+			base_graph,
+			pos,
+			edgelist=self_edges,
+			arrowstyle="-|>",
+			arrowsize=12,
+			edge_color="gray",
+			style="dashed",
+			connectionstyle="arc3,rad=0.3",
+		)
+		nx.draw_networkx_edge_labels(
+			base_graph,
+			pos,
+			edge_labels=self_edge_labels,
+			font_size=7,
+			label_pos=0.2,
+		)
+
+	plt.title("Gas network (edge and node flow/capacity)")
 	plt.axis("off")
 	plt.tight_layout()
 	plt.show()
